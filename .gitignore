@@ -237,3 +237,4 @@ csrc/third_party/
 
 # local build cache
 .vllm_ascend/
+.workbuddy/*

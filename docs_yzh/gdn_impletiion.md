@@ -3,6 +3,8 @@
 > 分析对象：`vllm_ascend/ops/gdn.py`（Ascend 910 路径）
 > 关联实现：`vllm_ascend/ops/gdn_attn_builder.py`、`vllm_ascend/ops/triton/fla/*`、`csrc/moe/chunk_*`、`csrc/attention/recurrent_gated_delta_rule`
 > 重点：prefill 阶段的并行计算优化原理
+>
+> **公式排版约定**：GitHub 会先对正文做一遍 markdown 转义处理，行内公式（`$...$`）里的 `\_`、`\,`、`\{` 等反斜杠会被吃掉（`\text{num\_spec}` 会变成 `\text{num_spec}`，进而在 MathJax 里报 “'_' allowed only in math mode”），且 GitHub 的 MathJax 未加载 ams 扩展，不认 `\operatorname`。因此本文约定：公式内不写下划线，标识符改用连字符（如 `\text{num-spec}` 对应变量 `num_spec`），函数名统一用 `\mathrm{}` 而非 `\operatorname{}`。改动公式时请保持这两条约定。
 
 ---
 
@@ -35,7 +37,7 @@
 GDN 在 delta rule 的基础上引入遗忘门。单步递推：
 
 $$
-S_t = S_{t-1}\cdot \operatorname{diag}(\alpha_t)\Big(I - \beta_t k_t k_t^{\top}\Big) + \beta_t v_t k_t^{\top},
+S_t = S_{t-1}\cdot \mathrm{diag}(\alpha_t)\Big(I - \beta_t k_t k_t^{\top}\Big) + \beta_t v_t k_t^{\top},
 \qquad \alpha_t = e^{g_t}
 $$
 
@@ -48,10 +50,10 @@ $$
 等价展开形式（delta 修正视角，更直观）：
 
 $$
-S_t = S_{t-1}\cdot\operatorname{diag}(\alpha_t) - \beta_t\Big(S_{t-1}\operatorname{diag}(\alpha_t) k_t - v_t\Big)k_t^{\top}
+S_t = S_{t-1}\cdot\mathrm{diag}(\alpha_t) - \beta_t\Big(S_{t-1}\mathrm{diag}(\alpha_t) k_t - v_t\Big)k_t^{\top}
 $$
 
-**这一步天然串行**：$S_t$ 严格依赖 $S_{t-1}$，递推深度 $O(T)$，tensor core 几乎闲置。所以它只用于 decode（$T$ 很小，通常 $=1$ 或 $=1+\text{num\_spec}$）。
+**这一步天然串行**：$S_t$ 严格依赖 $S_{t-1}$，递推深度 $O(T)$，tensor core 几乎闲置。所以它只用于 decode（$T$ 很小，通常 $=1$ 或 $=1+\text{num-spec}$）。
 
 ### 1.2 门控生成
 
@@ -59,9 +61,9 @@ $$
 
 $$
 \begin{aligned}
-x_t &= a_t + \text{dt\_bias} \\
-\operatorname{softplus}_\beta(x) &= \begin{cases}\dfrac{1}{\beta}\log\big(1+e^{\beta x}\big), & \beta x \le \tau \\ x, & \beta x > \tau\end{cases} \qquad (\beta=1.0,\ \tau=20.0)\\
-g_t &= -e^{A_{\log}} \cdot \operatorname{softplus}_\beta(x_t) \\
+x_t &= a_t + \text{dt-bias} \\
+\mathrm{softplus}_\beta(x) &= \begin{cases}\dfrac{1}{\beta}\log\big(1+e^{\beta x}\big), & \beta x \le \tau \\ x, & \beta x > \tau\end{cases} \qquad (\beta=1.0,\ \tau=20.0)\\
+g_t &= -e^{A_{\log}} \cdot \mathrm{softplus}_\beta(x_t) \\
 \beta_t &= \sigma(b_t)
 \end{aligned}
 $$
@@ -102,7 +104,7 @@ $$
 
 $$
 \begin{aligned}
-L &= \operatorname{tril}_{i>j}\Big(\operatorname{diag}(\beta)\,K K^{\top}\odot D\Big) \\
+L &= \mathrm{tril}_{i>j}\Big(\mathrm{diag}(\beta)\,K K^{\top}\odot D\Big) \\
 A &= \big(I - L\big)^{-1} \\
 W &= A\cdot\big(\beta \odot e^{\tilde g}\odot K\big) \\
 U &= A\cdot\big(\beta \odot V\big)
@@ -122,7 +124,7 @@ $$
 **块内输出**（`chunk_o.py:70-109`）：
 
 $$
-O_n = \text{scale}\cdot\left[\Big(Q_n H_n\Big)\odot e^{\tilde g^{(n)}} \;+\; \operatorname{tril}_{i\ge j}\Big(\big(Q_nK_n^{\top}\big)\odot D\Big)\,V'_n\right]
+O_n = \text{scale}\cdot\left[\Big(Q_n H_n\Big)\odot e^{\tilde g^{(n)}} \;+\; \mathrm{tril}_{i\ge j}\Big(\big(Q_nK_n^{\top}\big)\odot D\Big)\,V'_n\right]
 $$
 
 ### 1.4 为什么可以并行：仿射性是关键
@@ -141,8 +143,8 @@ $$
 
 $$
 \begin{aligned}
-\Phi_n &= \exp\big(\tilde g_{last,n}\big) I - K_n^{\top}\operatorname{diag}\big(e^{\tilde g_{last}-\tilde g}\big) W_n \in \mathbb{R}^{D_k\times D_k}\\
-P_n &= K_n^{\top}\operatorname{diag}\big(e^{\tilde g_{last}-\tilde g}\big) U_n \in \mathbb{R}^{D_k\times D_v}
+\Phi_n &= \exp\big(\tilde g_{last,n}\big) I - K_n^{\top}\mathrm{diag}\big(e^{\tilde g_{last}-\tilde g}\big) W_n \in \mathbb{R}^{D_k\times D_k}\\
+P_n &= K_n^{\top}\mathrm{diag}\big(e^{\tilde g_{last}-\tilde g}\big) U_n \in \mathbb{R}^{D_k\times D_v}
 \end{aligned}
 $$
 
@@ -170,7 +172,7 @@ def forward(self, hidden_states, output=None):
 Part 3 的门控归一化（对应 GDN 论文里的 output gate $z$）：
 
 $$
-y = \operatorname{RMSNorm}_{\text{weighted}}(o,\ z)
+y = \mathrm{RMSNorm}_{\text{weighted}}(o,\ z)
 $$
 
 代码 `gdn.py:338`：`core_attn_out = self.norm(core_attn_out, z)`。
@@ -253,7 +255,7 @@ $$
 `npu_causal_conv1d_custom` 完成（`gdn.py:406`、`:452`、`:474`、`:494`）。数学形式：
 
 $$
-x_t = \sum_{w=0}^{W-1} u_{t-w}\cdot c_w + b,\qquad W = \texttt{conv\_kernel\_size}
+x_t = \sum_{w=0}^{W-1} u_{t-w}\cdot c_w + b,\qquad W = \text{conv-kernel-size}
 $$
 
 权重预打包（把 `[D,1,W]` 转成内核要的 `[W,D]`）见 `gdn.py:62-80`：
@@ -334,7 +336,7 @@ b_A = tl.where(on_diagonal, b_A + 1.0, b_A) # 变成 I - L
 ```
 
 $$
-(I - L)^{-1} = \Big(I - \operatorname{tril}_{i>j}\big(\operatorname{diag}(\beta)KK^{\top}\odot D\big)\Big)^{-1}
+(I - L)^{-1} = \Big(I - \mathrm{tril}_{i>j}\big(\mathrm{diag}(\beta)KK^{\top}\odot D\big)\Big)^{-1}
 $$
 
 即 §1.3 中的 $A$。
@@ -412,7 +414,7 @@ o_ascendc = torch.ops._C_ascend.chunk_fwd_o(q_ascendc, k_ascendc, v_new, h, scal
 | $\times$ scale | `b_o = b_o * scale + tl.dot(b_A.to(b_v.dtype), b_v) * scale` |
 
 $$
-O_n = \text{scale}\cdot\left[\big(Q_nH_n\big)\odot e^{\tilde g^{(n)}} + \operatorname{tril}_{i\ge j}\Big(\big(Q_nK_n^{\top}\big)\odot D\Big)V'_n\right]
+O_n = \text{scale}\cdot\left[\big(Q_nH_n\big)\odot e^{\tilde g^{(n)}} + \mathrm{tril}_{i\ge j}\Big(\big(Q_nK_n^{\top}\big)\odot D\Big)V'_n\right]
 $$
 
 注意掩码是 **inclusive**（`>=`），因为对角线元素 $q_i\cdot k_i$ 也是合法的（$D_{ii}=\exp(0)=1$）。这与阶段 ② 的严格下三角（`>`）不同——阶段 ② 构造的是 $L$，对角必须为空。
@@ -640,7 +642,7 @@ use_fused_chunk = AscendGatedDeltaNetAttention._probe_fused_chunk() and get_pcp_
 | 项目 | 融合算子要求 | Triton 路径要求 |
 |---|---|---|
 | q/k 布局 | TND `[T, N_k, D_k]` | `[B,H,T,D_k]` |
-| initial_state | bf16，**不需要转置** | 需 `[D_k,D_v]`（要 `transpose(-1,-2)`） |
+| `initial_state` | bf16，**不需要转置** | 需 `[D_k,D_v]`（要 `transpose(-1,-2)`） |
 | g 的 cumsum | 不算，传原始 g | 内部算 |
 
 **顺带的收益**：`ssm_state` 物理布局是 `[N,H,D_v,D_k]`，而 chunk kernel 要 `[D_k,D_v]`。Triton 路径必须进 `transpose(-1,-2)`（`gdn.py:628`）、出 `transpose(-1,-2)`（`:643`）。以 $N=32,H=16,128\times128$, bf16 估，单个状态张量 16.7 MB，一来一回 33 MB，乘 30+ 层即 GB 级纯搬运。融合算子的 `[N,Nv,Dv,Dk]` 与 `ssm_state` 对齐，这笔开销归零。
@@ -695,7 +697,7 @@ if get_pcp_group().rank_in_group > 0:
 | 方案 | 串行深度 | 额外开销 |
 |---|---|---|
 | 朴素串行传递 | $O(T)$ | 无 |
-| PCP 修正 | $O(1)$ 并行 + $O(\text{world\_size})$ 小串行 | 1 次 all_gather + 1 次重跑 |
+| PCP 修正 | $O(1)$ 并行 + $O(\text{world-size})$ 小串行 | 1 次 `all_gather` + 1 次重跑 |
 
 `chunk_gated_delta_rule_fwd_hupdate` 仅在 `world_size > 1` 时调用（`chunk.py:138`），单卡零开销。
 
@@ -831,7 +833,7 @@ if keep_meta is not None:
 | `ssm_state` | fp32 或 bf16 | `[N, H, D_v, D_k]` | 递归路径保留 fp32 |
 | `h` (AscendC) | — | `[B, H, NT, D_k, D_v]` | `transpose_state_layout=False` |
 
-**initial_state 的清零时机很关键**（`gdn.py:609-613`）：
+**`initial_state` 的清零时机很关键**（`gdn.py:609-613`）：
 
 ```python
 # The fused op's state layout [N, Nv, Dv, Dk] matches ssm_state
@@ -875,7 +877,7 @@ record_attention_compute_start()
 | **现象** | grid 只有 `(NT, B)`，缺少 head 维度 |
 | **根因** | `for i_bh in range(H)` 把一个 chunk 的全部 head 放在同一 program 内串行处理，以复用 `A/g/beta` 的加载 |
 | **影响** | 短 prefill（$T \le 2048$）时 $NT \approx 32$，对 40 核的 910B 明显欠并行；长序列（$T=32$k 时 $NT=512$）无此问题 |
-| **验证** | 用 `T \in \{512, 2048, 8192, 32768\}$ 扫一遍该 kernel 的单独耗时占比，确认短序列下是否真是瓶颈 |
+| **验证** | 用 $T \in \lbrace 512, 2048, 8192, 32768 \rbrace$ 扫一遍该 kernel 的单独耗时占比，确认短序列下是否真是瓶颈 |
 | **可能改法** | 改造成与阶段 ① 相同的持久化 + task 均分（`NT*B*H` 个任务摊到 `num_core`）。代价是丢掉 head 间数据复用，需实测权衡 |
 
 ### #2 `LARGE_BLOCK_T = 1216` 硬编码 UB 拟合
@@ -954,7 +956,7 @@ record_attention_compute_start()
 | solve_tril 超粗块 | 1216 | `solve_tril.py:359`、`gdn_attn_builder.py:45` |
 | cumsum 工作集 | $2^{18}$ | `gdn_attn_builder.py:46`、`cumsum.py:92` |
 | softplus threshold | 20.0 | `fused_gdn_gating.py:65` |
-| BLK_HEADS / BLK_BATCHES | 8 / 64 | `fused_gdn_gating.py:72,76` |
+| `BLK_HEADS` / `BLK_BATCHES` | 8 / 64 | `fused_gdn_gating.py:72,76` |
 | `_PACKED_CONV_WEIGHT_NAME` | `ascend_conv1d_weight` | `gdn.py:47` |
 | q/k l2norm eps | — | `fla/l2norm.py` |
 
@@ -995,6 +997,6 @@ GDN 的 prefill 优化本质是把 §1.1 的 $O(T)$ 串行递推改写为 §1.3 
 
 1. **chunk 内**：阶段 ①~④、⑥ 在 `(chunk, head)` 轴上完全独立（§4.2）
 2. **chunk 间**：阶段 ⑤ 保留串行，但长度只有 $T/64$，且在 `(seq, head, V 块)` 三轴上并行
-3. **跨卡**：长序列经 PCP 切分，用仿射修正把串行段从 $O(T)$ 降到 $O(\text{world\_size})$
+3. **跨卡**：长序列经 PCP 切分，用仿射修正把串行段从 $O(T)$ 降到 $O(\text{world-size})$
 
 工程上再用四种手段把理论并行度兑现为吞吐：持久化内核消调度开销（阶段 ②）、超粗块消启动开销（阶段 ③）、host 端元数据预计算消 D2H 同步（§4.4）、融合算子消中间张量 HBM 往返（§4.2）。

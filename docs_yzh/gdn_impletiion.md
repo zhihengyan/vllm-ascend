@@ -4,7 +4,14 @@
 > 关联实现：`vllm_ascend/ops/gdn_attn_builder.py`、`vllm_ascend/ops/triton/fla/*`、`csrc/moe/chunk_*`、`csrc/attention/recurrent_gated_delta_rule`
 > 重点：prefill 阶段的并行计算优化原理
 >
-> **公式排版约定**：GitHub 会先对正文做一遍 markdown 转义处理，行内公式（`$...$`）里的 `\_`、`\,`、`\{` 等反斜杠会被吃掉（`\text{num\_spec}` 会变成 `\text{num_spec}`，进而在 MathJax 里报 “'_' allowed only in math mode”），且 GitHub 的 MathJax 未加载 ams 扩展，不认 `\operatorname`。因此本文约定：公式内不写下划线，标识符改用连字符（如 `\text{num-spec}` 对应变量 `num_spec`），函数名统一用 `\mathrm{}` 而非 `\operatorname{}`。改动公式时请保持这两条约定。
+> **公式排版约定**：GitHub 会先对正文做一遍 markdown 转义处理，行内公式（`$...$`）里的 `\_`、`\,`、`\{` 等反斜杠会被吃掉（`\text{num\_spec}` 会变成 `\text{num_spec}`，进而在 MathJax 里报 “'_' allowed only in math mode”），且 GitHub 的 MathJax 未加载 ams 扩展，不认 `\operatorname`。另外 GitHub 对行内公式的**定界符位置**有硬性要求，不满足就整条公式失效（`$` 原样显示）。因此本文约定四条：
+>
+> 1. 公式内不写下划线，标识符改用连字符（如 `\text{num-spec}` 对应变量 `num_spec`）；函数名统一用 `\mathrm{}` 而非 `\operatorname{}`。
+> 2. **开符号 `$` 的左侧必须是 ASCII 空格或行首**。紧跟汉字、全角标点（`：`、`（`、`，`、`。`）时公式不会被识别，需要在标点后补一个空格：`（ $T$ 很小）`。
+> 3. **闭符号 `$` 的右侧不能紧跟 ASCII 字母、数字或下划线**（`$T=32$k` 会失效）。这类单位后缀写进公式内部即可：`$T=32\text{k}$`。
+> 4. 定界符内侧不留空白：`$ x $` 不生效。
+>
+> 改动公式时请保持这些约定。
 
 ---
 
@@ -19,10 +26,10 @@
 | $H_g$ / $N_k$ | `num_k_heads` | key/query head 数（GQA） |
 | $D_k$ | `head_k_dim` | key/query 维度，典型 128 |
 | $D_v$ | `head_v_dim` | value 维度，典型 128 |
-| $\beta_t$ | `beta` | 写入门控，$b$ 经 sigmoid 得到，$\in(0,1)$ |
-| $g_t$ | `g` | log 遗忘门，$\le 0$，fp32 |
+| $\beta_t$ | `beta` | 写入门控， $b$ 经 sigmoid 得到， $\in(0,1)$ |
+| $g_t$ | `g` | log 遗忘门， $\le 0$，fp32 |
 | $\tilde g_t$ | `g_cumsum` | **块内**累积 log 遗忘门 |
-| $S_t$ / $H_n$ | `ssm_state` / `h` | 递归状态，$[D_k, D_v]$ |
+| $S_t$ / $H_n$ | `ssm_state` / `h` | 递归状态， $[D_k, D_v]$ |
 | $\Phi_n,\ P_n$ | — | 状态递推的仿射系数矩阵 |
 
 **状态张量 `ssm_state` 物理布局**：`[N, H, D_v, D_k]`。
@@ -53,7 +60,7 @@ $$
 S_t = S_{t-1}\cdot\mathrm{diag}(\alpha_t) - \beta_t\Big(S_{t-1}\mathrm{diag}(\alpha_t) k_t - v_t\Big)k_t^{\top}
 $$
 
-**这一步天然串行**：$S_t$ 严格依赖 $S_{t-1}$，递推深度 $O(T)$，tensor core 几乎闲置。所以它只用于 decode（$T$ 很小，通常 $=1$ 或 $=1+\text{num-spec}$）。
+**这一步天然串行**： $S_t$ 严格依赖 $S_{t-1}$，递推深度 $O(T)$，tensor core 几乎闲置。所以它只用于 decode（ $T$ 很小，通常 $=1$ 或 $=1+\text{num-spec}$）。
 
 ### 1.2 门控生成
 
@@ -79,7 +86,7 @@ blk_beta_output = tl.sigmoid(blk_b.to(tl.float32))
 
 两个工程要点：
 
-- `softplus` 的 `threshold=20.0` 分支是标准数值稳定技巧——$\beta x$ 大时 $e^{\beta x}$ 溢出，改用线性近似（误差可忽略）。这同时也是 **AscendC 算子需要 `threshold` 参数的原因**。
+- `softplus` 的 `threshold=20.0` 分支是标准数值稳定技巧—— $\beta x$ 大时 $e^{\beta x}$ 溢出，改用线性近似（误差可忽略）。这同时也是 **AscendC 算子需要 `threshold` 参数的原因**。
 - $g_t$ 恒 $\le 0$（负号 × 非负 softplus），这个性质被后文的 `safe_exp` 依赖。
 - 输出 dtype 有意区分：`g` 是 **fp32**，`beta` 跟随输入 dtype（bf16）。
 
@@ -417,7 +424,7 @@ $$
 O_n = \text{scale}\cdot\left[\big(Q_nH_n\big)\odot e^{\tilde g^{(n)}} + \mathrm{tril}_{i\ge j}\Big(\big(Q_nK_n^{\top}\big)\odot D\Big)V'_n\right]
 $$
 
-注意掩码是 **inclusive**（`>=`），因为对角线元素 $q_i\cdot k_i$ 也是合法的（$D_{ii}=\exp(0)=1$）。这与阶段 ② 的严格下三角（`>`）不同——阶段 ② 构造的是 $L$，对角必须为空。
+注意掩码是 **inclusive**（`>=`），因为对角线元素 $q_i\cdot k_i$ 也是合法的（ $D_{ii}=\exp(0)=1$）。这与阶段 ② 的严格下三角（`>`）不同——阶段 ② 构造的是 $L$，对角必须为空。
 
 ### 3.4 Decode / Spec 路径
 
@@ -455,7 +462,7 @@ core_attn_out_non_spec = torch.ops._C_ascend.npu_recurrent_gated_delta_rule(
 | **K 维** | $D_k$ | 仅累加方向，非并行轴 | ①②⑥ |
 | **跨卡（PCP）** | `world_size` | 需状态修正 | ⑤ |
 
-**核心收益**：串行深度从 $O(T)$ 降到 $O(T/C)$（$C=64$，降 64 倍），剩余计算全部变成可在 tensor core 上展开的矩阵乘。
+**核心收益**：串行深度从 $O(T)$ 降到 $O(T/C)$（ $C=64$，降 64 倍），剩余计算全部变成可在 tensor core 上展开的矩阵乘。
 
 ### 4.2 各阶段的并行策略与代码证据
 
@@ -513,7 +520,7 @@ def chunk_scaled_dot_kkt_fwd_kernel(...):
 
 这是**持久化 kernel（persistent kernel）**：固定开 `num_core` 个 program，每个核用 grid-stride 循环领取任务。
 
-- **收益 1**：消除调度开销。$NT\cdot B\cdot H$ 在长序列下可达数千，直接开数千 program 会让调度成为瓶颈；固定为核数后开销变常数。
+- **收益 1**：消除调度开销。 $NT\cdot B\cdot H$ 在长序列下可达数千，直接开数千 program 会让调度成为瓶颈；固定为核数后开销变常数。
 - **收益 2**：`multibuffer=True` + `num_stages=3`（`device_op.py:703-704`），UB↔GM 搬运与计算重叠。
 
 配套优化：`beta`/`g_cumsum` 显式 `permute(2,0,1)` 成 `[H,B,T]`（head-major），同 head 相邻 chunk 内存连续；`BK=128` 让 $D_k=128$ 时一次 dot 走完，消除 K 维循环。
@@ -529,7 +536,7 @@ N_BLOCKS: tl.constexpr = LARGE_BLOCK_T // 16 // NTASKS   # = 38
 
 三个设计意图：
 
-1. **grid 缩小 19 倍**：按 `BT=64` 算 grid 是 `(T/64, B*H)`，按 1216 算是 `(T/1216, B*H)`。$T=32$k 时 grid 从 512 降到 27。
+1. **grid 缩小 19 倍**：按 `BT=64` 算 grid 是 `(T/64, B*H)`，按 1216 算是 `(T/1216, B*H)`。 $T=32\text{k}$ 时 grid 从 512 降到 27。
 2. **块内批量化**：`b_A` 是 `(38, 16, 16)` 三维张量，38 个块同时驻留 UB。
 3. **前向代入向量化**（`solve_tril.py:105-116`）：
 
@@ -613,13 +620,13 @@ def grid(meta):
     return (triton.cdiv(V, meta["BV"]), N * H)
 ```
 
-grid 为 `(V/BV, N*H)`，$BV=128$ 时第一维退化为 1。此阶段无任何跨 chunk 依赖。
+grid 为 `(V/BV, N*H)`， $BV=128$ 时第一维退化为 1。此阶段无任何跨 chunk 依赖。
 
 #### 融合算子路径
 
 `gdn.py:180-235`（`_chunk_gated_delta_rule_fused`）用 `torch_npu.npu_chunk_gated_delta_rule` 一次覆盖阶段 ②~⑥。
 
-**收益是 HBM 往返**。中间张量尺度（$T=32$k, $H=16$, $d=128$, bf16）：
+**收益是 HBM 往返**。中间张量尺度（ $T=32\text{k}$, $H=16$, $d=128$, bf16）：
 
 | 张量 | 形状 | 大小 |
 |---|---|---|
@@ -680,7 +687,7 @@ $$
 S_i = F_i + \Phi_i\big(S_{i-1} - S_0\big)
 $$
 
-**为什么精确**：由 §1.4，$H_{n+1} = \Phi_n H_n + P_n$ 对 $H_n$ 是仿射的。以错误初值 $S_0$ 算出的 $F_i$ 与真实值只差一个线性传递项，上式**严格成立而非近似**。
+**为什么精确**：由 §1.4， $H_{n+1} = \Phi_n H_n + P_n$ 对 $H_n$ 是仿射的。以错误初值 $S_0$ 算出的 $F_i$ 与真实值只差一个线性传递项，上式**严格成立而非近似**。
 
 **步骤 5**：`rank > 0` 用修正后状态重跑本地 `fwd_h`（`chunk.py:178-195`）：
 
@@ -789,7 +796,7 @@ def safe_exp(x):
 
 在阶段 ②（`chunk_scaled_dot_kkt.py:82`）和阶段 ⑥（`chunk_o.py:96`）都用到。
 
-**为什么必需**：$D_{ij}=\exp(\tilde g_i - \tilde g_j)$ 在 $i<j$（上三角）时指数为正，直接 `exp` 会溢出成 `inf`。虽然紧接着有 `tl.where(rows > cols, b_A, 0)` 清零，**但溢出发生在清零之前**——`inf × 0 = nan`。`safe_exp` 把非法区域先压成 $-\infty$（`exp(-inf)=0`），从源头消除 `nan`。
+**为什么必需**： $D_{ij}=\exp(\tilde g_i - \tilde g_j)$ 在 $i<j$（上三角）时指数为正，直接 `exp` 会溢出成 `inf`。虽然紧接着有 `tl.where(rows > cols, b_A, 0)` 清零，**但溢出发生在清零之前**——`inf × 0 = nan`。`safe_exp` 把非法区域先压成 $-\infty$（`exp(-inf)=0`），从源头消除 `nan`。
 
 ### 5.2 空段压缩
 
@@ -876,7 +883,7 @@ record_attention_compute_start()
 | **位置** | `vllm_ascend/ops/triton/fla/wy_fast.py:42-44, 122` |
 | **现象** | grid 只有 `(NT, B)`，缺少 head 维度 |
 | **根因** | `for i_bh in range(H)` 把一个 chunk 的全部 head 放在同一 program 内串行处理，以复用 `A/g/beta` 的加载 |
-| **影响** | 短 prefill（$T \le 2048$）时 $NT \approx 32$，对 40 核的 910B 明显欠并行；长序列（$T=32$k 时 $NT=512$）无此问题 |
+| **影响** | 短 prefill（ $T \le 2048$）时 $NT \approx 32$，对 40 核的 910B 明显欠并行；长序列（ $T=32\text{k}$ 时 $NT=512$）无此问题 |
 | **验证** | 用 $T \in \lbrace 512, 2048, 8192, 32768 \rbrace$ 扫一遍该 kernel 的单独耗时占比，确认短序列下是否真是瓶颈 |
 | **可能改法** | 改造成与阶段 ① 相同的持久化 + task 均分（`NT*B*H` 个任务摊到 `num_core`）。代价是丢掉 head 间数据复用，需实测权衡 |
 
@@ -941,7 +948,7 @@ record_attention_compute_start()
 | **现象** | `grid = (cdiv(V, BV), N*H)`，`BV=128` 且 $D_v=128$ 时第一维恒为 1 |
 | **根因** | BV 写死 128 |
 | **影响** | $D_v=128$ 时该维度不提供额外并行度（仅 $N\times H$，小 batch 短序列下偏低）。属观察项，非确定问题 |
-| **验证** | 小 batch（$N=1$）场景下测该 kernel 的 AI Core 利用率 |
+| **验证** | 小 batch（ $N=1$）场景下测该 kernel 的 AI Core 利用率 |
 | **可能改法** | $D_v=128$ 时把 BV 降到 64 换 2 倍并行度，需实测是否被 UB 容量收益抵消 |
 
 ---

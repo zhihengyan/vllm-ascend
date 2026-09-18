@@ -591,7 +591,7 @@ for i_bh in range(H):          # 一个 program 处理一个 chunk 的全部 hea
 recompute_w_u_fwd_kernel[(NT, B)](...)
 ```
 
-grid 只有 `(NT, B)`，缺一个 head 维度。目的是把 `A / g / beta` 的加载摊到 $H$ 个 head 上复用，刷高算术强度。代价见 §6 待优化点 #1。
+grid 只有 `(NT, B)`，缺一个 head 维度。目的是把 `A / g / beta` 的加载摊到 $H$ 个 head 上复用，刷高算术强度。代价（短序列下欠并行）与改法见 §6.2 P3 与 P5。
 
 #### 阶段 ⑤ 唯一的串行段，但被两轴并行
 
@@ -872,84 +872,216 @@ record_attention_compute_start()
 
 ---
 
-## 6. 待优化点
+## 6. 优化路径
 
-> 以下均为**分析发现的优化空间**，非缺陷。每条给出定位、根因、影响面与验证建议。
+> 这一章统一用**访存流量**做收益标尺：算子整体是访存受限的，先把流量构成算清楚，再谈排序。
 
-### #1 阶段 ④ `recompute_w_u_fwd_kernel` grid 欠并行
+### 6.1 流量构成
 
-| 项 | 内容 |
+单位 `u` = 一个 bf16 `[T,H,D]` 张量每 token 的字节 = $H \cdot D \cdot 2 = 4096$ B
+（取长序列 $T=32\text{k}$， $H=16$ 个 v-head， $D_k = D_v = 128$，chunk 64）
+
+| 阶段 | 代码位置 | 流量（u/token） | 占比 |
+|---|---|---|---|
+| ① 块内 cumsum | `cumsum.py:92-112` | 0.03 | 0.1% |
+| ② 构造 $L$ | `chunk_scaled_dot_kkt.py:137` | 2.05 | 5.5% |
+| ③ 求逆 | `solve_tril.py:368,391` | 2.75 | 7.3% |
+| ④ 重算 $W$ / $U$ | `wy_fast.py:122` | 4.55 | 12.2% |
+| **⑤ 进侧布局转置（5 张量）** | `chunk.py:90-94` | **8.03** | **21.4%** |
+| ⑤ 状态扫描（AscendC） | `chunk.py:115` | 6.02 | 16.1% |
+| ⑥ 输出（AscendC） | `chunk.py:197` | 6.02 | 16.1% |
+| **出侧布局转置（3 张量）** | `chunk.py:211-213` | **8.00** | **21.4%** |
+| **合计** | | **37.45** | **100%** |
+
+（换算式：一个 `[T,H,D]` bf16 张量 = 1.0u； $A$ 为 `[T,H,64]` fp32 = 1.0u， $A_d$ 为 `[T,H,16]` fp32 = 0.25u， $A_i$ 为 `[T,H,64]` bf16 = 0.5u， $h$ 为 `[NT,H,128,128]` bf16 = 2.0u。）
+
+**三条读数**：
+
+1. **最大的单项不是任何一步计算，而是布局转置。** 进入 AscendC ⑤ 之前要把 5 张量从 `[B,T,H,D]` 转成 `[B,H,T,D]`，出来之后再把 3 张量转回去，合计 **16.03u = 42.8%**。
+2. **中间量落盘往返紧随其后。** ②③④ 之间传 `A`/`A_d`/`A_i` 占 **11.3%**，⑤⑥ 之间传 `h`/`v_new` 占 **16.0%**。若把这两段连同进出转置一起消掉，总流量可从 37.45u 降到约 15.4u（**降约 59%**）。
+3. **先做大的，再重估小的。** 消掉转置后分母从 37.45u 降到约 21u，中间量往返的占比会从 11.3% 涨到约 20%——顺序反过来会误判优先级。另外以上百分比全部是模型推的，落地前必须实测（§6.3 Step 1、Step 2）。
+
+### 6.2 五条路径（按预期收益排序）
+
+排序依据：**预期收益 = 收益上限 × 适用场景占比 × 确定性**。
+
+| | 路径 | 可消除流量 | 改动层 | 关键约束 |
+|---|---|---|---|---|
+| P1 | 进侧布局对齐 | 8.03u · **21.4%** | 纯 Python / Triton | 无，可独立交付 |
+| P2 | 出侧边界布局 | 8.00u · **21.4%** | AscendC 内核 | 需覆盖多个架构分支 |
+| P3 | ②③④ 中间量往返消除 | 4.25u · **11.3%** | 纯 Triton | 需先统一三者并行粒度 |
+| P4 | ⑤⑥ 融合 + 状态池布局 | 22.0u · **58.7%** | AscendC 内核 | 仅 A5 / PCP 大于 1 场景有价值 |
+| P5 | 低风险打底 | 约 3% | 纯 Python | 前四条的前置 |
+
+#### P1 进侧布局对齐（21.4%，不碰 C++）
+
+**原理**：⑤ 是 aclnn 算子，op_api 层强制输入连续，所以 `k`/`w`/`u`/`g`/`q` 进算子之前必须做一次 `transpose(1,2).contiguous()`（`chunk.py:90-94`）。这 5 次转置纯粹是在迁就消费者——而**这些张量的生产者是上游的纯 Triton 内核，本来就可以按目标布局直接写出**，转置于是自然消失。改完之后访存反而更连续（行 stride = K、列 stride = 1），**数学一行不改**。
+
+**做法**（按性价比拆成三步，可独立交付）：
+
+- **P1a · `w`/`u`**（阶段 ④ 产出）：store 索引由 `(bos*H+i_h)*K + t*H*K + k` 改为 `i_h*T*K + (bos+t)*K + k`，写入变成整块连续 → 省 4.0u（10.7%）
+- **P1b · `k`**（阶段 ②/④ 读、⑤⑥ 消费）：改按 head-major 读写，四处索引同步改 → 省 2.0u（5.3%）。② 是持久化内核，`task_id` 的划分方式不能动
+- **P1c · `q`/`g`**（生产端在 `gdn.py`）：在生产侧对齐 → 省 2.03u（5.4%）。会动 `rearrange_mixed_qkv`，与 spec-decode 的 `index_select` 路径耦合，改前先确认混合批单测覆盖到位
+
+**预期收益**：8.03u ≈ **21.4%** 访存流量。这是五条里唯一的「低风险 + 高收益」组合，**建议第一个做**。
+
+#### P2 出侧边界布局（21.4%，需改内核）
+
+**原理**：出侧同理——⑤⑥ 输出的是 `[B,H,T,D]`，回到 Python 后必须转成 `[B,T,H,D]`（`chunk.py:211-213` 的 3 次转置）。区别在于这里生产者是 AscendC 内核，Python 侧无从下手，只能让内核直接按目标布局写出。
+
+**做法**：内核里 **`transpose_state_layout` 开关已声明但留空**（op_api 明确拒绝：`transpose_state_layout is reserved and only false is supported.`），而 `chunk.py:208` 目前写死 `False`。实现该开关并按架构分支分别落地；两个调用点（`chunk.py:128`、`:208`）都要传参。
+
+**预期收益**：8.00u ≈ **21.4%** 流量，与 P1 是互不相干的两笔。门槛明显更高（要动 C++，且每个架构分支都要实现一遍），建议先用 P1 验证方向、确认收益逻辑成立，再排 P2。
+
+#### P3 ②③④ 中间量往返消除（11.3%）
+
+**原理**：②③④ 之间靠 HBM 传递 `A`、`A_d`、`A_i` 三张中间量。理论上它们可以合成为一个核，但**三者的并行粒度完全不同**——② 是持久化内核按核数均分任务（`chunk_scaled_dot_kkt.py:48-52`），③ 用 1216 token 的超粗块（`solve_tril.py:359`），④ 是 `(NT, B)` 且 program 内串行处理 16 个 head（`wy_fast.py:44,122`）。所以**不能直接写一个「大融合核」，必须先统一粒度**——而这个选择本身又依赖 UB 预算可动态推导。
+
+**做法**：
+
+- 推荐**把 ② 的「持久化 + task 均分」骨架扩展到 ③④**，比从零新建融合核便宜得多，还顺带解决阶段 ④ 在短序列下的欠并行（ $T \le 2048$ 时 $NT \approx 32$，对 40 核明显不足）。
+- 融合必然要重算 UB 预算，因此两项前置必须先落地：UB 容量动态推导（`get_ub_size_bytes()` 已存在）+ 跨文件魔数断言。
+- 探路方式：先单独修阶段 ④ 的 grid（补 head 维），用实测确认方向后再投入融合。
+
+**预期收益**：4.25u ≈ **11.3%** 流量，外加省掉 4~5 次 kernel 启动开销。
+
+#### P4 ⑤⑥ 融合 + 状态池布局（上限最高、场景最窄）
+
+**原理**：⑤⑥ 目前是两次独立的 AscendC 启动，中间用 HBM 传 `h`/`v_new`，连同进出转置这一段合计 22.0u。理想形态是状态驻片上、逐块推进，只剩输入输出的必要流量。另一处浪费在状态池：Triton 路径进出各要一次 `transpose(-1,-2).contiguous()`（`gdn.py:628`、`:643-645`），而 CANN 融合算子路径**已经是零拷贝**（`gdn.py:609-612` 注释说明其布局与 `ssm_state` 直接对齐）——把 Triton 路径对齐到它，这笔钱就省下来了。
+
+**做法**：把 ⑤⑥ 合成一个 AscendC 内核；同时实现状态池的 `transpose_state_layout`（与 P2 是同一个开关，可合并设计）。
+
+**预期收益**：流量上限从 37.45u 降到约 15u（**降约 59%**），端到端按 roofline 上限 20~30%。
+
+**为什么排第四**：它**只在两种没有替代品的场景才有意义**——其一，A5 上 CANN 融合算子尚未发布（`gdn.py:148-150` 的 TODO 使其探测必然失败）；其二，PCP 大于 1（融合算子限定 `world_size == 1`，`gdn.py:607`）。通用路径上融合算子已经在那儿了，**不要把它包装成通用提速**。如果 A5 或 PCP 大于 1 是主要部署形态，应把 P4 提到第一位。
+
+另有一点：它是唯一「越做越值钱」的路径——P1~P3 完成后 ⑤⑥ 的占比会从 32% 升到 50% 以上。
+
+#### P5 低风险打底
+
+**原理**：前四条都依赖一批基础建设，而这些基础项本身就有独立收益，且改动全在 Python 层。
+
+**做法**：UB 容量动态推导（替掉 `LARGE_BLOCK_T = 1216` 这类硬编码，让 910B / A3 / A5 各自推算分块）、跨文件魔数断言（防止三处联动常量失配产生静默错分块）、融合算子探测预热前移（消除首 token 抖动）、阶段 ④ 的 grid 补 head 维、② 的 exp 只算下三角（当前算满 64×64 = 4096 个，实际只用 2080 个）、门控与归一化小核审查。
+
+**预期收益**：单项都不到 3%，但**它是 P1~P4 的前置与保险**，建议第一批就做完，不要因为单项收益小而跳过。
+
+#### 已评估、建议不做的一项
+
+**用级数展开替换三级分块求逆**：现状求逆已经是三级分块，只有 16×16 对角块内部走前代换，跨块早就是 `tl.dot`。级数展开方案需要 5 次 64×64 矩阵乘（约 131 万 MAC），相比现状（约 15.6 万 MAC）**多出 8.4 倍算力**，而收益上限只有 7.3%；更麻烦的是精度——块合并刻意使用 `input_precision="ieee"`，换成低精度会伤 $(I+L)^{-1}$ 的精度，而它直接决定 delta rule 的稳定性。**除非实测阶段 ③ 占比超过 15% 且确认那 15 步向量链是热点，否则不做。**
+
+### 6.3 动手前的测试步骤
+
+> 这套测试是上面所有收益排序成立的前提——在改动任何代码之前先做完，否则所有「端到端 X%」都只是模型推的。
+
+**Step 0 · 冻结基线环境**（每组数字都必须附带这一行）
+
+```bash
+cd /d/Code/vllm-ascend && git rev-parse --short HEAD
+
+python -c "
+import torch, torch_npu
+from vllm_ascend.ops.triton.triton_utils import (
+    init_device_properties_triton, get_aicore_num, get_vectorcore_num, get_ub_size_bytes,
+)
+init_device_properties_triton()          # 必须先调，否则下面三个 getter 会 assert
+print('soc       :', torch_npu.npu.get_soc_version())
+print('device    :', torch.npu.get_device_name(0))
+print('ai core   :', get_aicore_num())
+print('vec core  :', get_vectorcore_num())
+print('UB bytes  :', get_ub_size_bytes())
+print('torch_npu :', torch_npu.__version__)
+"
+```
+
+**判据**：UB 实测值要与「1216 刚好卡进 UB」这一假设对齐。若实测 UB 明显大于假设值，说明 1216 正在浪费并行度，UB 动态推导应立即从「半天小事」升级为优先项。
+
+**Step 1 · 端到端基线（后面所有百分比的分母）**
+
+用仓库自带 benchmark，把 `load-format` 设为 `dummy` 免下载权重（见 `benchmarks/README.md`、`benchmarks/tests/latency-tests.json`），记录**单条长 prompt 的 TTFT**。这是「端到端 X%」唯一合法的分母。
+
+**Step 2 · 分阶段耗时占比（最关键的一步）**
+
+- **打点位置**：`vllm_ascend/ops/triton/fla/chunk.py` —— 阶段 ①~④ 各调用点、`:90-94`（5 张进侧转置）、`:115`（⑤）、`:197`（⑥）、`:211-213`（3 张出侧转置）。
+- **必须把 transpose 单独打点**，否则会被 ⑤⑥ 吞掉——而它是 P1/P2 能否立项的唯一证据。
+- **两种手段，互相交叉验证**：
+  - 轻量：`torch.npu.Event` 包住各段。可复用 `benchmarks/prepare_indexer_indices.py:30-63` 的 `graph_latency_us` 写法（含 warmup、取 median、排除编译期）：
+
+    ```python
+    def seg_us(fn, warmup=3, reps=20):
+        for _ in range(warmup):
+            fn()
+        torch.npu.synchronize()
+        s = torch.npu.Event(enable_timing=True)
+        e = torch.npu.Event(enable_timing=True)
+        s.record()
+        for _ in range(reps):
+            fn()
+        e.record()
+        e.synchronize()
+        return s.elapsed_time(e) * 1000 / reps      # 微秒/次
+    ```
+
+  - 权威：`msprof` / `torch_npu.profiler` 出算子级 timeline，用来验证 Event 口径没把异步下发算进去。
+- **产出表**：
+
+| 阶段 | 实测耗时 | 占比 | 与 §6.1 流量占比是否同阶 |
+|---|---|---|---|
+| ①~④ Triton | | | |
+| **进侧 5 次 transpose** | | | |
+| ⑤ fwd-h（AscendC） | | | |
+| ⑥ fwd-o（AscendC） | | | |
+| **出侧 3 次 transpose** | | | |
+
+**Step 3 · 变量矩阵扫描**
+
+$T \in \lbrace 512, 2048, 8192, 32768 \rbrace$ × PCP $\in \lbrace 1, 2, 4, 8 \rbrace$，每格记录各阶段耗时占比、总耗时、AI Core 利用率。
+
+重点盯两个拐点：
+
+- **阶段 ④ 在 $T \le 2048$ 时是否超比例变慢**（验证「缺 head 维导致欠并行」这个假说： $NT \approx 32$ 对 40 核确实不够）
+- **阶段 ③ 是否随 $T$ 线性劣化**（决定要不要碰求逆）
+
+**Step 4 · 判据表（先定阈值再看数据，避免事后找理由）**
+
+| 观测量 | 阈值 | 决策 |
+|---|---|---|
+| 转置相关耗时占比 | < 15% | **P1/P2 降级**（说明带宽已吸收，或 ⑤⑥ 掩盖了它） |
+| 转置相关耗时占比 | ≥ 25% | **P1 立即做，P2 排期** |
+| 阶段 ③（求逆）占比 | < 5% | **不做求逆改造** |
+| 阶段 ③ 占比 | > 15% | 重新评估求逆改造（但仍需先解决精度问题） |
+| 阶段 ④ 在 $T \le 2048$ 时占比 | > 15% | **阶段 ④ 的 grid 修复优先于 P3** |
+| ⑤⑥ 合计占比 | > 50% | P4 收益上限变大，重估其排位 |
+| 状态池转置耗时 | < 1% | **状态池布局降级为顺手做** |
+
+**Step 5 · 正确性基线（改之前先固化输出）**
+
+```bash
+# 算子级：Triton 五段式全流程
+pytest -sv tests/e2e/nightly/single_node/ops/singlecard_ops/triton/test_chunk_gated_delta_rule.py
+
+# 算子级：aclnn ⑤，含 reference 比对（cosine 阈值 0.99）与 bitwise 确定性
+pytest -sv tests/e2e/nightly/single_node/ops/singlecard_ops/test_chunk_gated_delta_rule_fwd_h_aclnn.py
+
+# 单测：主路径 / 混合批 / 层wise KV
+pytest -sv tests/ut/ops/test_gdn.py tests/ut/ops/test_gdn_mixed_batch.py tests/ut/ops/test_gdn_layerwise_kv.py
+```
+
+- **把改前的输出存盘**（`torch.save` 到本地，不要提交进仓库），改完逐项对比。**布局类改动应当位一致（bitwise）或余弦大于 0.99**——若出现「数值略有差异」，说明动了数学，需回退。
+- P1c 会动 `rearrange_mixed_qkv`，与 spec-decode 的 `index_select` 路径耦合，**`test_gdn_mixed_batch.py` 必须先全绿**再动。
+
+**Step 6 · 单点微基准（确认单项到底值多少）**
+
+- 一次 `transpose(1,2).contiguous()`（`k` / `w` / `u` 量级）到底多少微秒？直接决定 P1 的收益。
+- 复用 Step 2 的 `seg_us` 骨架，分别测：单次 transpose、② 内核、③ 内核、④ 内核、⑤ 内核、⑥ 内核。
+- **判据**：若「5 次 transpose 之和」与「①~④ 全部之和」同量级，说明边界开销确实是主要矛盾，P1/P2 的排位成立。
+
+**Step 7 · 每条路径交付后的回归口径**
+
+| 维度 | 必跑 |
 |---|---|
-| **位置** | `vllm_ascend/ops/triton/fla/wy_fast.py:42-44, 122` |
-| **现象** | grid 只有 `(NT, B)`，缺少 head 维度 |
-| **根因** | `for i_bh in range(H)` 把一个 chunk 的全部 head 放在同一 program 内串行处理，以复用 `A/g/beta` 的加载 |
-| **影响** | 短 prefill（ $T \le 2048$）时 $NT \approx 32$，对 40 核的 910B 明显欠并行；长序列（ $T=32\text{k}$ 时 $NT=512$）无此问题 |
-| **验证** | 用 $T \in \lbrace 512, 2048, 8192, 32768 \rbrace$ 扫一遍该 kernel 的单独耗时占比，确认短序列下是否真是瓶颈 |
-| **可能改法** | 改造成与阶段 ① 相同的持久化 + task 均分（`NT*B*H` 个任务摊到 `num_core`）。代价是丢掉 head 间数据复用，需实测权衡 |
-
-### #2 `LARGE_BLOCK_T = 1216` 硬编码 UB 拟合
-
-| 项 | 内容 |
-|---|---|
-| **位置** | `solve_tril.py:359`、`gdn_attn_builder.py:45`、`triton_utils.py:112-122` |
-| **现象** | `N_BLOCKS = 38` 使 `b_A`（38×16×16×4B ≈ 39 KB）加 `local_ori_A` 等刚好卡进 UB |
-| **根因** | 常量按某一代硬件的 UB 容量手调得出，但 910B / A3 / A5 的 UB 大小并不一致 |
-| **影响** | 换平台可能 UB 溢出（编译失败/性能劣化）或 UB 未用满（浪费并行度） |
-| **验证** | 在目标平台读 `get_ub_size_bytes()`，反算 1216 是否仍合适 |
-| **可能改法** | 由 `get_ub_size_bytes()` 动态推导 `LARGE_BLOCK_T`；同时给 `_GDN_SOLVE_TRIL_LARGE_BLOCK_SIZE` 加一个启动期断言，防止两处常量失配 |
-
-### #3 PCP 修正的 host 侧 Python 循环
-
-| 项 | 内容 |
-|---|---|
-| **位置** | `chunk.py:164-169` |
-| **现象** | `for i in range(1, world_size)` 是 host 侧循环，每轮一次 matmul + 一次 buffer 写 |
-| **根因** | 修正链条天然串行，直接照写 |
-| **影响** | `world_size=8` 时 7 次串行下发，会切断图模式下的算子重叠；单卡/PCP=2 时影响可忽略 |
-| **验证** | 对比 PCP=1/2/4/8 时的 prefill 端到端耗时，观察是否线性劣化 |
-| **可能改法** | 用一个 device 侧 scan kernel 替掉；但收益取决于实际 PCP 规模，优先级不高 |
-
-### #4 `_probe_fused_chunk` 懒加载引入首 token 抖动
-
-| 项 | 内容 |
-|---|---|
-| **位置** | `gdn.py:132-178`，调用点 `:607` |
-| **现象** | smoke call 在第一次 prefill 时才执行，含 `torch.npu.synchronize()` |
-| **根因** | 探测结果缓存在类变量上，天然是懒加载 |
-| **影响** | 一次性开销，但落在首 token 延迟的关键路径上 |
-| **验证** | profile 首个 prefill 请求的耗时，看探测占比 |
-| **可能改法** | 挪到模型加载阶段（如 `process_weights_after_loading` 的 hook 时机）预探测；注意此时 AI Core 可用的前提需要确认 |
-
-### #5 A5 平台融合算子缺失
-
-| 项 | 内容 |
-|---|---|
-| **位置** | `gdn.py:148-150` 的 TODO |
-| **现象** | `# TODO(2026/8/6): The A5-specific implementation is not available in the official release.` 探测必然失败，A5 只能走 Triton 五段式 |
-| **影响** | §4.2 中融合算子省掉的中间张量 HBM 往返（百 MB 量级 × 30+ 层）在 A5 上一点都省不掉。若 A5 是主要部署目标，影响不小 |
-| **验证** | 在 A5 上量化 Triton 路径 vs（A3 上的）融合路径的 prefill 吞吐差 |
-| **可能改法** | 等新 CANN 包；期间可考虑在 A5 上用 AscendC 自实现阶段 ②③ 的融合 |
-
-### #6 跨文件魔数缺乏断言保护
-
-| 项 | 内容 |
-|---|---|
-| **位置** | `gdn_attn_builder.py:43-46` ↔ `solve_tril.py:359` ↔ `cumsum.py:92` |
-| **现象** | `_GDN_SOLVE_TRIL_LARGE_BLOCK_SIZE = 608*2`、`_GDN_CUMSUM_WORKING_SET = 2**18` 与另两处常量必须一致，但只有注释提醒 |
-| **影响** | 任一处被改动而忘记同步，会静默产生错误分块（索引越界或结果错误），排查成本高 |
-| **验证** | — |
-| **可能改法** | 抽到一个共享常量模块，或在 `_build_non_spec_chunked_prefill_metadata` 入口加 `assert` |
-
-### #7 `chunk_o` 的 BV 分块在 $D_v=128$ 时退化
-
-| 项 | 内容 |
-|---|---|
-| **位置** | `chunk_o.py:138-139, 158-159` |
-| **现象** | `grid = (cdiv(V, BV), N*H)`，`BV=128` 且 $D_v=128$ 时第一维恒为 1 |
-| **根因** | BV 写死 128 |
-| **影响** | $D_v=128$ 时该维度不提供额外并行度（仅 $N\times H$，小 batch 短序列下偏低）。属观察项，非确定问题 |
-| **验证** | 小 batch（ $N=1$）场景下测该 kernel 的 AI Core 利用率 |
-| **可能改法** | $D_v=128$ 时把 BV 降到 64 换 2 倍并行度，需实测是否被 UB 容量收益抵消 |
+| 数值 | Step 5 全部用例 + 与存盘基线的逐项对比 |
+| 性能 | Step 1 的 TTFT **和** Step 2 的分阶段占比，两者都要——防止「局部变快、整体变慢」 |
+| 平台 | 至少覆盖 910B（主）+ A3；A5 / 310P 若有环境一并跑（UB 推导与 P4 都是平台相关的） |
 
 ---
 
@@ -994,6 +1126,10 @@ record_attention_compute_start()
 |---|---|
 | `tests/ut/ops/test_gdn_mixed_batch.py` | mixed prefill+decode 的 token 边界与 qkv 复用 |
 | `tests/ut/ops/test_gdn_layerwise_kv.py` | layerwise KV pool 交互 |
+| `tests/ut/ops/test_gdn.py`、`test_gdn_attn_builder.py`、`test_gdn_chunk_meta.py` | 主路径 / 元数据构建 / chunk 索引 |
+| `tests/e2e/nightly/.../triton/test_chunk_gated_delta_rule.py` | Triton 五段式全流程（含 310P 布局一致性用例） |
+| `tests/e2e/nightly/.../test_chunk_gated_delta_rule_fwd_h_aclnn.py` | 阶段 ⑤ AscendC 内核 vs reference（cosine 0.99）+ bitwise 确定性 |
+| `tests/e2e/nightly/.../triton/test_fused_gdn_gating.py` | 门控 $g/\beta$ 生成 |
 | `tests/e2e/pull_request/one_card/aclgraph/test_aclgraph_accuracy.py` | 图模式精度一致性 |
 
 ---
@@ -1007,3 +1143,5 @@ GDN 的 prefill 优化本质是把 §1.1 的 $O(T)$ 串行递推改写为 §1.3 
 3. **跨卡**：长序列经 PCP 切分，用仿射修正把串行段从 $O(T)$ 降到 $O(\text{world-size})$
 
 工程上再用四种手段把理论并行度兑现为吞吐：持久化内核消调度开销（阶段 ②）、超粗块消启动开销（阶段 ③）、host 端元数据预计算消 D2H 同步（§4.4）、融合算子消中间张量 HBM 往返（§4.2）。
+
+**剩下的最大杠杆在「边界」而非「算力」**：§6.1 的流量复算显示，进出 AscendC 算子的布局转置合计占全流程 42.8%，是最大的单项——动手顺序与验证方法见 §6.2 ~ §6.3。

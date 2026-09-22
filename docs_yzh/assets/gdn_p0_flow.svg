@@ -1,0 +1,70 @@
+<svg width="680" height="608" viewBox="0 0 680 608" xmlns="http://www.w3.org/2000/svg" role="img">
+  <title>staging 搬运在 chunked GDN 前向算法链条中的位置</title>
+  <desc>左侧是前向主链路的简化示意：上游预处理产出 q、k、v、β 与门控累积和；接着算出 chunk 内 KKT 矩阵 A，布局为 BHT；然后是一段被高亮的 staging 搬运，把 A 从 BHT 翻成 TND；求逆环节只接受 TND 布局；解出结果后再翻回 BHT，交给下游重算 W 与 U；最后是状态扫描与块内输出。右侧面板标注这一步的数据来源、搬运目的与后续去向。</desc>
+  <defs>
+    <marker id="ar2" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse">
+      <path d="M2 1L8 5L2 9" fill="none" stroke="context-stroke" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/>
+    </marker>
+  </defs>
+  <style>
+    text { font-family: 'Segoe UI', 'PingFang SC', 'Microsoft YaHei', system-ui, sans-serif; }
+  </style>
+
+  <rect x="0" y="0" width="680" height="608" fill="#1A1A1A"/>
+
+  <text x="40" y="32" font-size="12" fill="#B4B2A9">chunk_gated_delta_rule 前向主链路（简化）</text>
+
+  <rect x="60" y="60" width="280" height="52" rx="4" fill="#1F1F1D" stroke="#444441" stroke-width="0.8"/>
+  <text x="76" y="81" font-size="11.5" fill="#9C9A92">【上游·简写】预处理</text>
+  <text x="76" y="99" font-size="10.5" fill="#6E6C66">causal_conv1d + 门控累积和 → q / k / v / β / g</text>
+
+  <line x1="200" y1="112" x2="200" y2="140" stroke="#6A685F" stroke-width="1.5" marker-end="url(#ar2)"/>
+
+  <rect x="60" y="146" width="280" height="52" rx="4" fill="#242422" stroke="#5F5E5A" stroke-width="0.8"/>
+  <text x="76" y="167" font-size="11.5" fill="#E8E6E0">算出 chunk 内的 KKT 矩阵 A</text>
+  <text x="76" y="185" font-size="10.5" fill="#B4B2A9">A = (K·Kᵀ) ⊙ 衰减 ⊙ β，布局 BHT，64 MB</text>
+
+  <line x1="200" y1="198" x2="200" y2="222" stroke="#EFB75B" stroke-width="1.5" marker-end="url(#ar2)"/>
+  <text x="186" y="213" font-size="10.5" fill="#EFB75B" text-anchor="end">① 搬运前的数据来源</text>
+
+  <rect x="60" y="228" width="280" height="88" rx="4" fill="#3A2E1A" stroke="#EFB75B" stroke-width="1.2"/>
+  <text x="76" y="252" font-size="11.5" font-weight="500" fill="#EFB75B">★ P0 待优化的搬运：staging</text>
+  <text x="76" y="272" font-size="10.5" fill="#CBBFA6">A 从 BHT 翻成 TND，再翻回来，一去一回</text>
+  <text x="76" y="290" font-size="10.5" fill="#CBBFA6">共 52.4 万趟，每趟只搬 128 字节</text>
+  <text x="76" y="308" font-size="10.5" fill="#CBBFA6">仅在 BT = 64 且变长打包时触发</text>
+
+  <line x1="200" y1="316" x2="200" y2="358" stroke="#EFB75B" stroke-width="1.5" marker-end="url(#ar2)"/>
+  <text x="186" y="340" font-size="10.5" fill="#EFB75B" text-anchor="end">② 搬运目的</text>
+
+  <rect x="60" y="364" width="280" height="52" rx="4" fill="#242422" stroke="#5F5E5A" stroke-width="0.8"/>
+  <text x="76" y="385" font-size="11.5" fill="#E8E6E0">求逆 (I + A)⁻¹</text>
+  <text x="76" y="403" font-size="10.5" fill="#B4B2A9">这一步只认 TND 布局，没有等价替换</text>
+
+  <line x1="200" y1="416" x2="200" y2="444" stroke="#EFB75B" stroke-width="1.5" marker-end="url(#ar2)"/>
+  <text x="186" y="433" font-size="10.5" fill="#EFB75B" text-anchor="end">③ 搬运回来之后</text>
+
+  <rect x="60" y="450" width="280" height="52" rx="4" fill="#242422" stroke="#5F5E5A" stroke-width="0.8"/>
+  <text x="76" y="471" font-size="11.5" fill="#E8E6E0">staging 第二趟：解翻回 BHT</text>
+  <text x="76" y="489" font-size="10.5" fill="#B4B2A9">交给下游，用 A 重算 W / U</text>
+
+  <line x1="200" y1="502" x2="200" y2="530" stroke="#6A685F" stroke-width="1.5" marker-end="url(#ar2)"/>
+
+  <rect x="60" y="536" width="280" height="44" rx="4" fill="#1F1F1D" stroke="#444441" stroke-width="0.8"/>
+  <text x="76" y="562" font-size="11.5" fill="#9C9A92">【下游·简写】状态扫描 h → 块内输出 o</text>
+
+  <line x1="340" y1="264" x2="368" y2="264" stroke="#EFB75B" stroke-width="0.8" stroke-dasharray="3 3"/>
+
+  <rect x="368" y="228" width="272" height="210" rx="4" fill="#241F14" stroke="#EFB75B" stroke-width="0.8"/>
+  <text x="384" y="254" font-size="11.5" font-weight="500" fill="#EFB75B">这一步在链条上的位置</text>
+
+  <text x="384" y="284" font-size="11" fill="#E8E6E0">来源：上游算出的矩阵 A</text>
+  <text x="384" y="301" font-size="10.5" fill="#B4B2A9">布局是 BHT，落在 GM 里，64 MB</text>
+
+  <text x="384" y="329" font-size="11" fill="#E8E6E0">目的：换成求逆认的布局</text>
+  <text x="384" y="346" font-size="10.5" fill="#B4B2A9">布局不合就得先翻一遍</text>
+
+  <text x="384" y="374" font-size="11" fill="#E8E6E0">之后：翻回 BHT，重算 W / U</text>
+  <text x="384" y="391" font-size="10.5" fill="#B4B2A9">再往下才是 h 与 o</text>
+
+  <text x="384" y="417" font-size="10.5" fill="#EFB75B">它不产出任何数学结果，整段与计算零重叠</text>
+</svg>

@@ -1,0 +1,70 @@
+<svg width="680" height="434" viewBox="0 0 680 434" xmlns="http://www.w3.org/2000/svg" role="img">
+  <title>GDN TND 布局 staging：逐行搬运与成块搬运对比</title>
+  <desc>左侧为现状：每行 128 字节单独搬运，52.4 万趟，105 万次搬运调用与 210 万次握手。右侧为改法：每个 chunk 一次搬 8 KB，8192 趟，1.6 万次搬运调用与 3.3 万次握手。底部说明固定 batch 与 head 之后源数据本身连续，落点可用 dstStride 自动跳行，因此无需逐行搬运。</desc>
+  <defs>
+    <marker id="arrow" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse">
+      <path d="M2 1L8 5L2 9" fill="none" stroke="context-stroke" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/>
+    </marker>
+  </defs>
+  <style>
+    text { font-family: 'Segoe UI', 'PingFang SC', 'Microsoft YaHei', system-ui, sans-serif; }
+  </style>
+
+  <rect x="0" y="0" width="680" height="434" fill="#1A1A1A"/>
+
+  <rect x="40" y="40" width="292" height="216" rx="12" fill="#501313" stroke="#F09595" stroke-width="0.5"/>
+  <text x="60" y="64" font-size="13" font-weight="500" fill="#F7C1C1">现状 · 一行一搬，每行都要停下等</text>
+  <text x="96" y="78" font-size="11" fill="#F09595" text-anchor="middle" dominant-baseline="central">源 GM</text>
+  <text x="268" y="78" font-size="11" fill="#F09595" text-anchor="middle" dominant-baseline="central">目标 GM</text>
+  <rect x="72" y="84" width="48" height="8" rx="1.5" fill="#791F1F" stroke="#F09595" stroke-width="0.5"/>
+  <rect x="72" y="96" width="48" height="8" rx="1.5" fill="#791F1F" stroke="#F09595" stroke-width="0.5"/>
+  <rect x="72" y="108" width="48" height="8" rx="1.5" fill="#791F1F" stroke="#F09595" stroke-width="0.5"/>
+  <rect x="72" y="120" width="48" height="8" rx="1.5" fill="#791F1F" stroke="#F09595" stroke-width="0.5"/>
+  <rect x="72" y="132" width="48" height="8" rx="1.5" fill="#791F1F" stroke="#F09595" stroke-width="0.5"/>
+  <rect x="72" y="144" width="48" height="8" rx="1.5" fill="#791F1F" stroke="#F09595" stroke-width="0.5"/>
+  <rect x="72" y="156" width="48" height="8" rx="1.5" fill="#791F1F" stroke="#F09595" stroke-width="0.5"/>
+  <rect x="72" y="168" width="48" height="8" rx="1.5" fill="#791F1F" stroke="#F09595" stroke-width="0.5"/>
+  <line x1="122" y1="130" x2="142" y2="130" stroke="#F09595" stroke-width="1.5" marker-end="url(#arrow)"/>
+  <rect x="144" y="114" width="76" height="32" rx="6" fill="#791F1F" stroke="#F09595" stroke-width="0.5"/>
+  <text x="182" y="126" font-size="11" fill="#F7C1C1" text-anchor="middle" dominant-baseline="central">UB 单缓冲</text>
+  <text x="182" y="138" font-size="11" fill="#F09595" text-anchor="middle" dominant-baseline="central">128 B</text>
+  <line x1="222" y1="130" x2="242" y2="130" stroke="#F09595" stroke-width="1.5" marker-end="url(#arrow)"/>
+  <rect x="244" y="84" width="48" height="8" rx="1.5" fill="#791F1F" stroke="#F09595" stroke-width="0.5"/>
+  <rect x="244" y="96" width="48" height="8" rx="1.5" fill="#791F1F" stroke="#F09595" stroke-width="0.5"/>
+  <rect x="244" y="108" width="48" height="8" rx="1.5" fill="#791F1F" stroke="#F09595" stroke-width="0.5"/>
+  <rect x="244" y="120" width="48" height="8" rx="1.5" fill="#791F1F" stroke="#F09595" stroke-width="0.5"/>
+  <rect x="244" y="132" width="48" height="8" rx="1.5" fill="#791F1F" stroke="#F09595" stroke-width="0.5"/>
+  <rect x="244" y="144" width="48" height="8" rx="1.5" fill="#791F1F" stroke="#F09595" stroke-width="0.5"/>
+  <rect x="244" y="156" width="48" height="8" rx="1.5" fill="#791F1F" stroke="#F09595" stroke-width="0.5"/>
+  <rect x="244" y="168" width="48" height="8" rx="1.5" fill="#791F1F" stroke="#F09595" stroke-width="0.5"/>
+  <text x="60" y="206" font-size="13" fill="#F7C1C1">524,288 次迭代 · 每次只搬 128 B</text>
+  <text x="60" y="228" font-size="12" fill="#F09595">105 万次搬运调用 + 210 万次握手</text>
+
+  <rect x="348" y="40" width="292" height="216" rx="12" fill="#042C53" stroke="#85B7EB" stroke-width="0.5"/>
+  <text x="368" y="64" font-size="13" font-weight="500" fill="#B5D4F4">改法 · 一个 chunk 一次搬完</text>
+  <text x="404" y="78" font-size="11" fill="#85B7EB" text-anchor="middle" dominant-baseline="central">源 GM</text>
+  <text x="576" y="78" font-size="11" fill="#85B7EB" text-anchor="middle" dominant-baseline="central">目标 GM</text>
+  <rect x="380" y="84" width="48" height="92" rx="4" fill="#185FA5" stroke="#85B7EB" stroke-width="0.5"/>
+  <line x1="430" y1="130" x2="450" y2="130" stroke="#85B7EB" stroke-width="1.5" marker-end="url(#arrow)"/>
+  <rect x="452" y="114" width="76" height="32" rx="6" fill="#185FA5" stroke="#85B7EB" stroke-width="0.5"/>
+  <text x="490" y="126" font-size="11" fill="#E6F1FB" text-anchor="middle" dominant-baseline="central">UB 8 KB</text>
+  <text x="490" y="138" font-size="11" fill="#B5D4F4" text-anchor="middle" dominant-baseline="central">双缓冲</text>
+  <line x1="530" y1="130" x2="550" y2="130" stroke="#85B7EB" stroke-width="1.5" marker-end="url(#arrow)"/>
+  <rect x="552" y="84" width="48" height="8" rx="1.5" fill="#0C447C" stroke="#85B7EB" stroke-width="0.5"/>
+  <rect x="552" y="96" width="48" height="8" rx="1.5" fill="#0C447C" stroke="#85B7EB" stroke-width="0.5"/>
+  <rect x="552" y="108" width="48" height="8" rx="1.5" fill="#0C447C" stroke="#85B7EB" stroke-width="0.5"/>
+  <rect x="552" y="120" width="48" height="8" rx="1.5" fill="#0C447C" stroke="#85B7EB" stroke-width="0.5"/>
+  <rect x="552" y="132" width="48" height="8" rx="1.5" fill="#0C447C" stroke="#85B7EB" stroke-width="0.5"/>
+  <rect x="552" y="144" width="48" height="8" rx="1.5" fill="#0C447C" stroke="#85B7EB" stroke-width="0.5"/>
+  <rect x="552" y="156" width="48" height="8" rx="1.5" fill="#0C447C" stroke="#85B7EB" stroke-width="0.5"/>
+  <rect x="552" y="168" width="48" height="8" rx="1.5" fill="#0C447C" stroke="#85B7EB" stroke-width="0.5"/>
+  <text x="368" y="206" font-size="13" fill="#E6F1FB">8,192 次迭代 · 每次搬 8 KB</text>
+  <text x="368" y="228" font-size="12" fill="#B5D4F4">1.6 万次搬运调用 + 3.3 万次握手</text>
+
+  <rect x="40" y="276" width="600" height="118" rx="12" fill="#0C447C" stroke="#85B7EB" stroke-width="0.5"/>
+  <text x="60" y="300" font-size="13" font-weight="500" fill="#E6F1FB">为什么可以一次搬一整个 chunk</text>
+  <text x="60" y="322" font-size="12" fill="#B5D4F4">固定住 (batch, head) 之后，源数据本身就是连续的 [T, 64] 一整块；</text>
+  <text x="60" y="342" font-size="12" fill="#B5D4F4">落点只是要「隔行放」——每放完一行，跳过 15 行（16 个头 × 64 个数）。</text>
+  <text x="60" y="362" font-size="12" fill="#B5D4F4">这种跳行搬运指令本身就支持（dstStride），不用我们切碎了喂给它。</text>
+  <text x="60" y="382" font-size="12" fill="#85B7EB">FlashQLA 的答案更彻底：它压根不摆盘，这一步直接不存在。</text>
+</svg>

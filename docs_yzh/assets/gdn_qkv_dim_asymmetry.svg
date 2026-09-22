@@ -1,0 +1,59 @@
+<svg width="680" height="384" viewBox="0 0 680 384" xmlns="http://www.w3.org/2000/svg" role="img">
+  <title>内积配对与外积配对的对比：传统注意力的 Q 与 K，以及 GDN 的 k 与 v</title>
+  <desc>上半部分：传统注意力里 Q 与 K 通过内积配对，被收缩掉的那一维必须相等，算完之后该维从结果里消失，输出是序列长度乘序列长度的分数矩阵。下半部分：GDN 里 k 与 v 通过外积配对，两个维度都保留下来，分别成为状态矩阵 S 的宽和高，二者相互独立、没有必须相等的约束。底部注明 GDN 内部 q 与 k 之间仍然是内积，因此那一对维度依然必须相等。</desc>
+  <defs>
+    <marker id="ar" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse">
+      <path d="M2 1L8 5L2 9" fill="none" stroke="context-stroke" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/>
+    </marker>
+  </defs>
+  <style>
+    text { font-family: 'Segoe UI', 'PingFang SC', 'Microsoft YaHei', system-ui, sans-serif; }
+  </style>
+
+  <rect x="0" y="0" width="680" height="384" fill="#1A1A1A"/>
+
+  <text x="40" y="34" font-size="13" font-weight="500" fill="#E8E6E0">传统注意力：Q 与 K 的配对是内积</text>
+
+  <rect x="56" y="56" width="100" height="32" rx="3" fill="#5F5E5A" stroke="#B4B2A9" stroke-width="0.5"/>
+  <text x="106" y="72" font-size="11.5" fill="#E8E6E0" text-anchor="middle" dominant-baseline="central">Q [T, d_q]</text>
+
+  <text x="171" y="72" font-size="14" fill="#B4B2A9" text-anchor="middle" dominant-baseline="central">×</text>
+
+  <rect x="186" y="56" width="110" height="32" rx="3" fill="#5F5E5A" stroke="#B4B2A9" stroke-width="0.5"/>
+  <text x="241" y="72" font-size="11.5" fill="#E8E6E0" text-anchor="middle" dominant-baseline="central">Kᵀ [d_k, T]</text>
+
+  <line x1="308" y1="72" x2="330" y2="72" stroke="#B4B2A9" stroke-width="1.5" marker-end="url(#ar)"/>
+
+  <rect x="342" y="56" width="122" height="32" rx="3" fill="#5F5E5A" stroke="#B4B2A9" stroke-width="0.5"/>
+  <text x="403" y="72" font-size="11.5" fill="#E8E6E0" text-anchor="middle" dominant-baseline="central">Scores [T, T]</text>
+
+  <path d="M56 110 L56 102 L296 102 L296 110" fill="none" stroke="#EFB75B" stroke-width="1"/>
+  <text x="176" y="128" font-size="11.5" fill="#EFB75B" text-anchor="middle">同一条约束：d_q 必须等于 d_k</text>
+
+  <text x="484" y="64" font-size="11.5" fill="#B4B2A9">d 被逐元素乘加消掉，</text>
+  <text x="484" y="84" font-size="11.5" fill="#B4B2A9">结果里已经没有它。</text>
+
+  <line x1="40" y1="150" x2="640" y2="150" stroke="#444441" stroke-width="0.5"/>
+
+  <text x="40" y="182" font-size="13" font-weight="500" fill="#E8E6E0">GDN：k 与 v 的配对是外积</text>
+
+  <rect x="56" y="204" width="140" height="30" rx="3" fill="#185FA5" stroke="#85B7EB" stroke-width="0.5"/>
+  <text x="126" y="219" font-size="11.5" fill="#E6F1FB" text-anchor="middle" dominant-baseline="central">k 长度 D_k</text>
+
+  <text x="212" y="219" font-size="14" fill="#85B7EB" text-anchor="middle" dominant-baseline="central">⊗</text>
+
+  <rect x="228" y="204" width="140" height="30" rx="3" fill="#185FA5" stroke="#85B7EB" stroke-width="0.5"/>
+  <text x="298" y="219" font-size="11.5" fill="#E6F1FB" text-anchor="middle" dominant-baseline="central">v 长度 D_v</text>
+
+  <line x1="382" y1="219" x2="404" y2="219" stroke="#85B7EB" stroke-width="1.5" marker-end="url(#ar)"/>
+
+  <rect x="416" y="190" width="152" height="88" rx="4" fill="#185FA5" stroke="#85B7EB" stroke-width="0.5"/>
+  <text x="492" y="222" font-size="12" fill="#E6F1FB" text-anchor="middle" dominant-baseline="central">S 状态矩阵</text>
+  <text x="492" y="246" font-size="11.5" fill="#B5D4F4" text-anchor="middle" dominant-baseline="central">D_k × D_v</text>
+
+  <text x="492" y="298" font-size="11.5" fill="#85B7EB" text-anchor="middle">宽来自 k，高来自 v，两者各自独立</text>
+
+  <text x="40" y="336" font-size="11.5" fill="#B4B2A9">注：GDN 内部 q 与 k 之间仍然是内积，所以 d_q = d_k 这条约束在 GDN 里照样成立。</text>
+
+  <text x="40" y="362" font-size="11.5" fill="#EFB75B">自由度来自外积：k 与 v 之间没有任何约束，所以 D_k 与 D_v 可以分开调。</text>
+</svg>

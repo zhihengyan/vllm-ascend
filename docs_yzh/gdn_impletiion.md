@@ -3,15 +3,6 @@
 > 分析对象：`vllm_ascend/ops/gdn.py`（Ascend 910 路径）
 > 关联实现：`vllm_ascend/ops/gdn_attn_builder.py`、`vllm_ascend/ops/triton/fla/*`、`csrc/moe/chunk_*`、`csrc/attention/recurrent_gated_delta_rule`
 > 重点：prefill 阶段的并行计算优化原理
->
-> **公式排版约定**：GitHub 会先对正文做一遍 markdown 转义处理，行内公式（`$...$`）里的 `\_`、`\,`、`\{` 等反斜杠会被吃掉（`\text{num\_spec}` 会变成 `\text{num_spec}`，进而在 MathJax 里报 “'_' allowed only in math mode”），且 GitHub 的 MathJax 未加载 ams 扩展，不认 `\operatorname`。另外 GitHub 对行内公式的**定界符位置**有硬性要求，不满足就整条公式失效（`$` 原样显示）。因此本文约定四条：
->
-> 1. 公式内不写下划线，标识符改用连字符（如 `\text{num-spec}` 对应变量 `num_spec`）；函数名统一用 `\mathrm{}` 而非 `\operatorname{}`。
-> 2. **开符号 `$` 的左侧必须是 ASCII 空格或行首**。紧跟汉字、全角标点（`：`、`（`、`，`、`。`）时公式不会被识别，需要在标点后补一个空格：`（ $T$ 很小）`。
-> 3. **闭符号 `$` 的右侧不能紧跟 ASCII 字母、数字或下划线**（`$T=32$k` 会失效）。这类单位后缀写进公式内部即可：`$T=32\text{k}$`。
-> 4. 定界符内侧不留空白：`$ x $` 不生效。
->
-> 改动公式时请保持这些约定。
 
 ---
 
